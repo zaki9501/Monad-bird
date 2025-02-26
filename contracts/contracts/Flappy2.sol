@@ -1,119 +1,115 @@
-pragma solidity ^0.5.0;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
 contract Flappy2 {
     uint public silverScore = 10;
     uint public goldScore = 40;
-    uint public fee = 1 finney;
-    uint public silverPrize = 1 finney;
-    uint public goldPrize = 5 finney;
-    uint public newRecordPrize = 10 finney;
+    uint public silverPrize = 0.1 ether;
+    uint public goldPrize = 0.5 ether;
     address public owner;
+    bool public active = true;
 
-    uint[] public price = [0, 10 finney, 30 finney, 40 finney, 50 finney, 1 ether];
-    mapping (address => bool) public isPlaying;
+    uint[] public price = [0, 1 ether, 3 ether, 5 ether, 8 ether, 10 ether];
+    mapping(address => bool) public isPlaying;
+    mapping(address => mapping(uint => bool)) public ownedBirds;
+    mapping(address => uint) public usingBird;
+    mapping(address => uint) public pendingRewards; // Stores pending rewards
 
-    mapping (address => mapping (uint => bool)) public ownedBirds;
-    mapping (address => uint) public usingBird;
+    event GameStarted(address indexed player);
+    event GameEnded(address indexed player, uint score, uint reward);
+    event RewardClaimed(address indexed player, uint amount);
+    event BirdPurchased(address indexed player, uint birdId, uint price);
+    event ContractDeactivated();
+    event FundsWithdrawn(address indexed owner, uint amount);
+    event Received(address indexed sender, uint amount);
 
     modifier onlyOwner() {
-        require(msg.sender == owner, 'only contract owner can peform this');
+        require(msg.sender == owner, "Only contract owner can perform this action");
         _;
     }
 
-    constructor () public {
+    modifier isActive() {
+        require(active, "Contract is inactive");
+        _;
+    }
+
+    constructor() {
         owner = msg.sender;
     }
 
-    function setSilverPrize(uint prize)
-        public
-    {
+    function setSilverPrize(uint prize) external onlyOwner {
         silverPrize = prize;
     }
 
-    function setGoldPrize(uint prize)
-        public
-    {
+    function setGoldPrize(uint prize) external onlyOwner {
         goldPrize = prize;
     }
 
-    function setNewRecordPrize(uint prize)
-        public
-    {
-        newRecordPrize = prize;
-    }
-
-    function getUsingBird()
-        public
-        view
-        returns (uint)
-    {
-        return usingBird[msg.sender];
-    }
-
-    function useBird(uint birdId)
-        public
-    {
-        require(birdId < price.length, 'invalid birdId');
-        require(ownedBirds[msg.sender][birdId] || birdId == 0, 'this bird is not yours');
-        usingBird[msg.sender] = birdId;
-    }
-
-    function play()
-        public
-        payable
-    {
-        // require(!isPlaying[msg.sender], 'player must not in game');
-        require(msg.value >= fee, 'you must pay for playing');
-        if (msg.value > fee) {
-            msg.sender.transfer(msg.value - fee);
-        }
+    function play() external isActive {
+        require(!isPlaying[msg.sender], "Player is already in a game");
         isPlaying[msg.sender] = true;
+        emit GameStarted(msg.sender);
     }
 
-    function endGame(uint score)
-        public
-    {
-        require(isPlaying[msg.sender], 'player must be in game');
+    function endGame(uint score) external isActive {
+        require(isPlaying[msg.sender], "Player must be in a game");
         isPlaying[msg.sender] = false;
+
+        uint reward = 0;
         if (score >= goldScore) {
-            msg.sender.transfer(goldPrize);
+            reward = goldPrize;
         } else if (score >= silverScore) {
-            msg.sender.transfer(silverPrize);
+            reward = silverPrize;
         }
+
+        if (reward > 0) {
+            pendingRewards[msg.sender] += reward; // Store reward instead of sending
+        }
+
+        emit GameEnded(msg.sender, score, reward);
     }
 
-    function quit()
-        public
-    {
+    function claimReward() external isActive {
+        uint amount = pendingRewards[msg.sender];
+        require(amount > 0, "No reward to claim");
+        require(address(this).balance >= amount, "Contract does not have enough funds");
+
+        pendingRewards[msg.sender] = 0; // Reset before sending to avoid re-entrancy
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        require(success, "Reward transfer failed");
+
+        emit RewardClaimed(msg.sender, amount);
+    }
+
+    function quit() external isActive {
+        require(isPlaying[msg.sender], "Player must be in a game");
         isPlaying[msg.sender] = false;
     }
 
-    function purchase(uint birdId)
-        public
-        payable
-    {
-        require(msg.value >= price[birdId], 'value is not enough');
-        require(birdId < price.length, 'invalid birdId');
-       ownedBirds[msg.sender][birdId] = true;
+    function purchase(uint birdId) external payable isActive {
+        require(birdId < price.length, "Invalid birdId");
+        require(msg.value >= price[birdId], "Insufficient funds to purchase");
+
+        ownedBirds[msg.sender][birdId] = true;
+        emit BirdPurchased(msg.sender, birdId, msg.value);
     }
 
-    function getMyBirds() public view returns (bool, bool, bool, bool, bool, bool)
-    {
-        return (true, ownedBirds[msg.sender][1], ownedBirds[msg.sender][2], ownedBirds[msg.sender][3], ownedBirds[msg.sender][4], ownedBirds[msg.sender][5]);
+    function withdrawAll() external onlyOwner {
+        uint balance = address(this).balance;
+        require(balance > 0, "No funds to withdraw");
+        
+        (bool success, ) = payable(owner).call{value: balance}("");
+        require(success, "Withdraw failed");
+        
+        emit FundsWithdrawn(owner, balance);
     }
 
-    function withdrawal(uint amount)
-        public
-        onlyOwner
-    {
-        require(amount < address(this).balance, 'amount must be less than contract balance');
-        selfdestruct(msg.sender);
+    function deactivateContract() external onlyOwner {
+        active = false;
+        emit ContractDeactivated();
     }
 
-    function destroy()
-        public
-        onlyOwner
-    {
-        selfdestruct(msg.sender);
+    receive() external payable {
+        emit Received(msg.sender, msg.value);
     }
 }
